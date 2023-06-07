@@ -93,6 +93,9 @@ var (
 
 	//DiskKeySealingPCRs represents PCRs that we use for sealing
 	DiskKeySealingPCRs = tpm2.PCRSelection{Hash: tpm2.AlgSHA256, PCRs: []int{0, 1, 2, 3, 4, 6, 7, 8, 9, 13, 14}}
+
+	// cached vault key
+	cachedVaultKey []byte
 )
 
 // SealedKeyType holds different types of sealed key
@@ -529,8 +532,18 @@ func FetchSealedVaultKey(log *base.LogObject) ([]byte, error) {
 	if sealedKeyPresent {
 		log.Noticef("FetchSealedVaultKey unseal key")
 	}
+
 	//By this, we have a key sealed into TPM
-	return UnsealDiskKey(DiskKeySealingPCRs)
+	key, err := UnsealDiskKey(DiskKeySealingPCRs)
+	if err == nil {
+		// ignore if read locking failed, there is a slight chance TPM
+		// device is not implementing this feature.
+		if err := readLockNvIndex(TpmSealedDiskPrivHdl); err != nil {
+			log.Warnf("readLockNvIndex: read locking failed : %v", err)
+		}
+	}
+
+	return key, err
 }
 
 // SealDiskKey seals key into TPM2.0, with provided PCRs
@@ -580,7 +593,7 @@ func SealDiskKey(key []byte, pcrSel tpm2.PCRSelection) error {
 		EmptyPassword,
 		EmptyPassword,
 		nil,
-		tpm2.AttrOwnerWrite|tpm2.AttrOwnerRead,
+		tpm2.AttrOwnerWrite|tpm2.AttrOwnerRead|tpm2.AttrReadSTClear,
 		uint16(len(priv)),
 	); err != nil {
 		return fmt.Errorf("NVDefineSpace %v failed: %v", TpmSealedDiskPrivHdl, err)
@@ -599,7 +612,7 @@ func SealDiskKey(key []byte, pcrSel tpm2.PCRSelection) error {
 		EmptyPassword,
 		EmptyPassword,
 		nil,
-		tpm2.AttrOwnerWrite|tpm2.AttrOwnerRead,
+		tpm2.AttrOwnerWrite|tpm2.AttrOwnerRead|tpm2.AttrReadSTClear,
 		uint16(len(public)),
 	); err != nil {
 		return fmt.Errorf("NVDefineSpace %v failed: %v", TpmSealedDiskPubHdl, err)
@@ -619,8 +632,14 @@ func isSealedKeyPresent() bool {
 	}
 	defer rw.Close()
 
+	// TODO
 	_, err = tpm2.NVReadEx(rw, TpmSealedDiskPrivHdl,
 		tpm2.HandleOwner, EmptyPassword, 0)
+
+	if err == 10 {
+		fmt.Print("HEllo")
+	}
+
 	return err == nil
 }
 
@@ -629,8 +648,24 @@ func isLegacyKeyPresent() bool {
 	return err == nil
 }
 
+func readLockNvIndex(idx tpmutil.Handle) error {
+	rw, err := tpm2.OpenTPM(TpmDevicePath)
+	if err != nil {
+		return err
+	}
+
+	defer rw.Close()
+	// read lock the index, after the TPM is restarted we can read the the index again
+	return tpm2.NVReadLock(rw, tpm2.HandleOwner, idx, EmptyPassword)
+}
+
 // UnsealDiskKey unseals key from TPM2.0
 func UnsealDiskKey(pcrSel tpm2.PCRSelection) ([]byte, error) {
+	// if we already unlocked the key successfully, just return it.
+	if cachedVaultKey != nil {
+		return cachedVaultKey, nil
+	}
+
 	rw, err := tpm2.OpenTPM(TpmDevicePath)
 	if err != nil {
 		return nil, err
@@ -662,11 +697,12 @@ func UnsealDiskKey(pcrSel tpm2.PCRSelection) ([]byte, error) {
 	}
 	defer tpm2.FlushContext(rw, session)
 
-	key, err := tpm2.UnsealWithSession(rw, session, sealedObjHandle, EmptyPassword)
+	cachedVaultKey, err := tpm2.UnsealWithSession(rw, session, sealedObjHandle, EmptyPassword)
 	if err != nil {
 		return nil, fmt.Errorf("UnsealWithSession failed: %v", err)
 	}
-	return key, nil
+
+	return cachedVaultKey, nil
 }
 
 // PolicyPCRSession prepares TPM2 Auth Policy session, with PCR as the policy
