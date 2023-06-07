@@ -12,6 +12,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
+	"math"
 	"math/big"
 	"os"
 	"unsafe"
@@ -623,6 +624,27 @@ func SealDiskKey(key []byte, pcrSel tpm2.PCRSelection) error {
 		return fmt.Errorf("NVWrite %v failed: %v", TpmSealedDiskPubHdl, err)
 	}
 	return nil
+}
+
+func Handles(rw io.ReadWriter, handleType tpm2.HandleType) ([]tpmutil.Handle, error) {
+	// Handle type is determined by the most-significant octet (MSO) of the property.
+	property := uint32(handleType) << 24
+	vals, moreData, err := tpm2.GetCapability(rw, tpm2.CapabilityHandles, math.MaxUint32, property)
+	if err != nil {
+		return nil, err
+	}
+	if moreData {
+		return nil, fmt.Errorf("tpm2.GetCapability() should never return moreData==true for tpm2.CapabilityHandles")
+	}
+	handles := make([]tpmutil.Handle, len(vals))
+	for i, v := range vals {
+		handle, ok := v.(tpmutil.Handle)
+		if !ok {
+			return nil, fmt.Errorf("unable to assert type tpmutil.Handle of value %#v", v)
+		}
+		handles[i] = handle
+	}
+	return handles, nil
 }
 
 func isSealedKeyPresent() bool {
