@@ -466,7 +466,7 @@ func main() {
 			os.Exit(1)
 		}
 
-		encVkeyWire, err := getVualtKeyWireFormat(encVkey, digest256)
+		encVkeyWire, err := getVaultKeyWireFormat(encVkey, digest256)
 		if err != nil {
 			logerr("error when getting cloud formatted key: %v\n", err)
 			os.Exit(1)
@@ -559,7 +559,7 @@ func readDeviceKeyPubFromFile(certFile string) (crypto.PublicKey, error) {
 	return cert.PublicKey, nil
 }
 
-func getVualtKeyWireFormat(encryptedVaultKey []byte, digest256 []byte) (string, error) {
+func getVaultKeyWireFormat(encryptedVaultKey []byte, digest256 []byte) (string, error) {
 	keyData := &attest.AttestVolumeKeyData{
 		EncryptedKey: encryptedVaultKey,
 		DigestSha256: digest256,
