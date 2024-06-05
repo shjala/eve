@@ -55,18 +55,6 @@ RUN for patch in *.patch; do \
  make -C src RPM_OPT_FLAGS=-DNONLS static && \
  cp src/lshw-static /out/usr/bin/lshw && strip /out/usr/bin/lshw
 
-# build the tpm-recovery tool
-WORKDIR /
-COPY recover-tpm/ recover-tpm/
-WORKDIR /recover-tpm
-SHELL ["/bin/ash", "-eo", "pipefail", "-c"]
-# hadolint ignore=SC2046
-RUN echo "Running go vet" && go vet ./... && echo "Running go fmt" && \
-    ERR=$(gofmt -e -l -s $(find . -name \*.go | grep -v /vendor/)) && \
-    if [ -n "$ERR" ] ; then echo "go fmt Failed - ERR: $ERR"; exit 1 ; fi
-RUN CGO_ENABLED=0 go build -ldflags "-s -w" -o recovertpm . && \
-    cp recovertpm /out/usr/bin/recovertpm
-
 # building hexedit
 WORKDIR /tmp/hexedit/hexedit-1.5
 # hadolint ignore=DL4006
