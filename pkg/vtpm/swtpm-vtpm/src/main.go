@@ -11,11 +11,15 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path"
+	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/google/go-tpm/tpm2"
 	etpm "github.com/lf-edge/eve/pkg/pillar/evetpm"
+	fileutils "github.com/lf-edge/eve/pkg/pillar/utils/file"
 )
 
 const (
@@ -41,7 +45,8 @@ func makeDirs(dir string) error {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 
-	// make sure it has the right permissions, no harm!
+	// if path already exist MkdirAll won't check the perms,
+	// so sure it has the right permissions by applying it again.
 	if err := os.Chmod(dir, 0755); err != nil {
 		return fmt.Errorf("failed to set permissions for directory: %w", err)
 	}
@@ -49,8 +54,14 @@ func makeDirs(dir string) error {
 	return nil
 }
 
+func HwtpmIsAvailable() bool {
+	_, err := os.Stat(etpm.TpmDevicePath)
+	return err == nil
+}
+
 func runVirtualTpmInstance(id string) error {
 	statePath := fmt.Sprintf(swtpmStatePath, id)
+	ekPath := path.Join(statePath, "ek.pub")
 	logPath := fmt.Sprintf(swtpmLogPath, id)
 	sockPath := fmt.Sprintf(SwtpmSocketPath, id)
 	pidPath := fmt.Sprintf(SwtpmPidPath, id)
@@ -66,8 +77,7 @@ func runVirtualTpmInstance(id string) error {
 		return fmt.Errorf("failed to create vtpm state directory: %w", err)
 	}
 
-	_, err := os.Stat(etpm.TpmDevicePath)
-	if err != nil {
+	if HwtpmIsAvailable() != true {
 		log.Println("TPM is not available, running swtpm without state encryption!")
 
 		cmd := exec.Command(swtpmPath, swtpmArgs...)
@@ -76,11 +86,6 @@ func runVirtualTpmInstance(id string) error {
 		}
 	} else {
 		log.Println("TPM is available, running swtpm with state encryption!")
-		rw, err := tpm2.OpenTPM(etpm.TpmDevicePath)
-		if err != nil {
-			return fmt.Errorf("OpenTPM failed with err: %w", err)
-		}
-		defer rw.Close()
 
 		key, err := etpm.UnsealDiskKey(etpm.DiskKeySealingPCRs)
 		if err != nil {
@@ -95,12 +100,97 @@ func runVirtualTpmInstance(id string) error {
 		cmd := exec.Command(swtpmPath, swtpmArgs...)
 		if err := cmd.Run(); err != nil {
 			// this shall not fail 🧙🏽‍♂️
-			newErr := os.Remove(stateEncryptionKey)
-			return fmt.Errorf("failed to run swtpm: %w, failed to remove key file %w", err, newErr)
+			rmErr := os.Remove(stateEncryptionKey)
+			if rmErr != nil {
+				return fmt.Errorf("failed to run swtpm: %w, failed to remove key file %w", err, rmErr)
+			}
+			return fmt.Errorf("failed to run swtpm: %w", err)
+		}
+
+		// wait a bit for SWTPM to initialize
+		time.Sleep(3 * time.Second)
+
+		// if we can't read the EK from SWTPM, it is possibly malfunctioning
+		// and of no use, so kill it.
+		ek, err := GetVirtualTpmEKPub(sockPath)
+		if err != nil {
+			ekErr := fmt.Errorf("failed to get EK: %w", err)
+			// SWTPM should remove the key after reading it, but just in case
+			// make sure key is gone.
+			rmErr := os.Remove(stateEncryptionKey)
+			if rmErr != nil {
+				ekErr = fmt.Errorf("%w, failed to remove key file %w", ekErr, rmErr)
+			}
+
+			err = KillVirtualTpmInstance(pidPath)
+			if err != nil {
+				return fmt.Errorf("%w, %w", ekErr, err)
+			}
+		}
+
+		// if this fails, something is wrong in the system,
+		// so kill the SWTPM instance to prevent further state corruption.
+		wrErr := fileutils.WriteRename(ekPath, ek)
+		if wrErr != nil {
+			err = KillVirtualTpmInstance(pidPath)
+			if err != nil {
+				return fmt.Errorf("%w, %w", wrErr, err)
+			}
+			return fmt.Errorf("failed to write EK to file: %w", err)
 		}
 	}
 
 	return nil
+}
+
+func KillVirtualTpmInstance(pidPath string) error {
+	pidBytes, err := os.ReadFile(pidPath)
+	if err != nil {
+		return fmt.Errorf("failed to kill potentially malfunctioning SWTPM intance, failed to read pid file: %w", err)
+	}
+
+	pid, err := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
+	if err != nil {
+		return fmt.Errorf("failed to kill potentially malfunctioning SWTPM intance, failed to convert pid to int: %w", err)
+	}
+
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		return fmt.Errorf("failed to kill potentially malfunctioning SWTPM intance, failed to find process with pid %d: %w", pid, err)
+	}
+
+	if err := process.Kill(); err != nil {
+		return fmt.Errorf("failed to kill potentially malfunctioning SWTPM intance with pid %s: %w", pid, err)
+	}
+
+	return nil
+}
+
+func InitializeVirtualTpm(sockPath string) error {
+	rw, err := tpm2.OpenTPM(sockPath)
+	if err != nil {
+		return fmt.Errorf("OpenTPM failed with err: %w", err)
+	}
+	defer rw.Close()
+
+	if err := etpm.CreateKey(rw, etpm.TpmEKHdl, tpm2.HandleEndorsement, etpm.DefaultEkTemplate, false); err != nil {
+		return fmt.Errorf("Error in creating Endorsement key: %w ", err)
+	}
+	if err := etpm.CreateKey(rw, etpm.TpmSRKHdl, tpm2.HandleOwner, etpm.DefaultSrkTemplate, false); err != nil {
+		return fmt.Errorf("Error in creating SRK key: %w ", err)
+	}
+	if err := etpm.CreateKey(rw, etpm.TpmAIKHdl, tpm2.HandleOwner, etpm.DefaultAikTemplate, false); err != nil {
+		return fmt.Errorf("Error in creating Attestation key: %w ", err)
+	}
+	if err := etpm.CreateKey(rw, etpm.TpmQuoteKeyHdl, tpm2.HandleOwner, etpm.DefaultQuoteKeyTemplate, false); err != nil {
+		return fmt.Errorf("Error in creating Quote key: %w ", err)
+	}
+	if err := etpm.CreateKey(rw, etpm.TpmEcdhKeyHdl, tpm2.HandleOwner, etpm.DefaultEcdhKeyTemplate, false); err != nil {
+		return fmt.Errorf("Error in creating ECDH key: %w ", err)
+	}
+
+	return nil
+
 }
 
 func main() {
