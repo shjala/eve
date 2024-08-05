@@ -709,3 +709,72 @@ func (msrv *Msrv) withPatchEnvelopesByIP() func(http.Handler) http.Handler {
 		})
 	}
 }
+
+// handleActivateCredntial handles the request sign the SWTPM instance EK public key
+// with HWTPM AIK, and proofs that AIK resides in the HWTPM with the given HWTPM EK.
+func (msrv *Msrv) handleActivateCredntial() func(http.ResponseWriter, *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// FIX-ME: is it possible for app to know its UUID?
+		//uuid := chi.URLParam(r, "uuid")
+		var uuid string
+
+		if r.Method == http.MethodGet {
+			ekPubByte, aikPubByte, aiKnameMarshaled, err := getActivateCredntialParams(uuid)
+			if err != nil {
+				msrv.Log.Errorf("handleActivateCredntial: %v", err)
+				sendError(w, http.StatusInternalServerError, "Operation failed")
+				return
+			}
+
+			activateCred := ActivateCredTpmParam{
+				Ek:      base64.StdEncoding.EncodeToString(ekPubByte),
+				AikPub:  base64.StdEncoding.EncodeToString(aikPubByte),
+				AikName: base64.StdEncoding.EncodeToString(aiKnameMarshaled),
+			}
+			out, err := json.Marshal(activateCred)
+			if err != nil {
+				msrv.Log.Errorf("handleActivateCredntial: error marshaling JSON payload %v", err)
+				sendError(w, http.StatusInternalServerError, "Operation failed")
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			w.Write(out)
+			return
+
+		} else if r.Method == http.MethodPost {
+			in, err := io.ReadAll(io.LimitReader(r.Body, ActivateCredMaxSize))
+			if err != nil {
+				msrv.Log.Errorf("handleActivateCredntial, ReadAll : %v", err)
+				sendError(w, http.StatusInternalServerError, "Operation failed")
+				return
+			}
+
+			cred, digest, sig, err := activateCredntial(uuid, in)
+			if err != nil {
+				msrv.Log.Errorf("handleActivateCredntial, activateVtpmCredntial: %v", err)
+				sendError(w, http.StatusInternalServerError, "Operation failed")
+				return
+			}
+
+			activateCred := ActivateCredActivated{
+				Secret: base64.StdEncoding.EncodeToString(cred),
+				Digest: base64.StdEncoding.EncodeToString(digest),
+				Sig:    base64.StdEncoding.EncodeToString(sig),
+			}
+			out, err := json.Marshal(activateCred)
+			if err != nil {
+				msrv.Log.Errorf("handleActivateCredntial, error marshaling JSON payload : %v", err)
+				sendError(w, http.StatusInternalServerError, "Operation failed")
+				return
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			w.Write(out)
+			return
+		}
+
+		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
+	}
+}

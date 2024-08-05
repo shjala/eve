@@ -57,6 +57,13 @@ const AppInstMetadataResponseSizeLimitInBytes = 35840 // 35KB
 // SignerMaxSize is how large objects we will sign
 const SignerMaxSize = 65535
 
+// ActivateCredMaxSize is how large the singature + nonce can be.
+// The singature is produce by a 2048 AIK key and is 256 bytes, encoded in base64
+// that would be 344 bytes. The nonce parameter must not be longer than the
+// longest digest size implemented, in the TPM. For SHA256 this is 32 bytes.
+// So 1024 bytes should be enough to handle largest nonce and even 4096 bit RSA key.
+const ActivateCredMaxSize = 1024
+
 // DiagMaxSize is the max returned size for diag
 const DiagMaxSize = 65535
 
@@ -628,6 +635,9 @@ func (msrv *Msrv) MakeMetadataHandler() http.Handler {
 		r.Get("/app/info.json", msrv.handleAppInfo())
 
 		r.Post("/tpm/signer", msrv.handleSigner(&zedcloudCtx))
+
+		r.Post("/tpm/activatecredential/", msrv.handleActivateCredntial())
+		r.Get("/tpm/activatecredential/", msrv.handleActivateCredntial())
 
 		r.Route("/patch", func(r chi.Router) {
 			r.Use(msrv.withPatchEnvelopesByIP())
