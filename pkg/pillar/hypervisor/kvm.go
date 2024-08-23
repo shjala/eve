@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"text/template"
 	"time"
 
@@ -18,11 +19,14 @@ import (
 	"github.com/lf-edge/eve/pkg/pillar/types"
 	uuid "github.com/satori/go.uuid"
 	"github.com/sirupsen/logrus"
+	"golang.org/x/sys/unix"
 )
 
 // KVMHypervisorName is a name of kvm hypervisor
 const KVMHypervisorName = "kvm"
 const minUringKernelTag = uint64((5 << 16) | (4 << 8) | (72 << 0))
+
+var clientCid = uint32(unix.VMADDR_CID_HOST + 1)
 
 // We build device model around PCIe topology according to best practices
 //    https://github.com/qemu/qemu/blob/master/docs/pcie.txt
@@ -393,6 +397,13 @@ const qemuCANBusTemplate = `
   qom-type = "can-host-socketcan"
   canbus = "canbus{{.ID}}"
   if = "{{.HostIfName}}"
+`
+
+const qemuVsockTemplate = `
+[device "eve-vsock0"]
+  driver = "vhost-vsock-pci"
+  disable-legacy = "on"
+  guest-cid = "{{.GuestCID}}"
 `
 
 const kvmStateDir = "/run/hypervisor/kvm/"
@@ -938,6 +949,20 @@ func (ctx KvmContext) CreateDomConfig(domainName string,
 				return logError("can't write CAN Bus assignment to config file %s (%v)", file.Name(), err)
 			}
 		}
+	}
+
+	// render vsock settings, this should go last to avoid
+	// PCI ID conflicts, let qemu assign PCI ID for vsock.
+	//
+	// clientCid needs atomic add to avoid race condition
+	// in case CreateDomConfig is called concurrently, which
+	// happens at least in unit tests.
+	vsockContext := struct {
+		GuestCID string
+	}{GuestCID: fmt.Sprintf("%d", atomic.AddUint32(&clientCid, 1))}
+	t, _ = template.New("qemuVsock").Parse(qemuVsockTemplate)
+	if err := t.Execute(file, vsockContext); err != nil {
+		return logError("can't write to config file %s (%v)", file.Name(), err)
 	}
 
 	return nil
