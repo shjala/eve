@@ -26,6 +26,9 @@ profile vtpm /usr/bin/vtpm {
     # allow saving boot variables
     /persist/status                 rw,
 
+    # allow checking kernel TPM reset protection
+    /sys/class/tpm/tpm0/null_name    r,
+
     # allow vtpm to send term signal to swtpm
     signal (send) peer=swtpm,
 }
