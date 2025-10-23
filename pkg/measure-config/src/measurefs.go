@@ -6,6 +6,7 @@
 package main
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
@@ -341,6 +342,17 @@ func main() {
 		log.Fatalf("couldn't open TPM device %s. Exiting", TpmDevicePath)
 	}
 	defer tpm.Close()
+
+	// Extend PCR 1 with a random value
+	randomValue := make([]byte, 32)
+	if _, err := rand.Read(randomValue); err != nil {
+		log.Fatalf("couldn't read random value: %v", err)
+	}
+	if err := tpm2.PCREvent(tpm, tpmutil.Handle(tpm2.PCRFirst+1), randomValue); err != nil {
+		log.Fatalf("couldn't extend PCR 1: %v", err)
+	} else {
+		log.Printf("Extended PCR 1 with random value")
+	}
 
 	events, err := measureConfig(tpm)
 	if err != nil {
