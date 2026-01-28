@@ -22,6 +22,13 @@ type VaultStatus struct {
 	ErrorAndTime
 }
 
+type VaultKeyEncVersion int
+
+const (
+	Unespecified   VaultKeyEncVersion = iota // For backward compatibility
+	EncryptionAEAD                           // AES GCM
+)
+
 // VaultConfig represents vault key to be used
 type VaultConfig struct {
 	TpmKeyOnly bool
